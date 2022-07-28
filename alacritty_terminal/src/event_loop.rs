@@ -262,6 +262,8 @@ where
             processed += unprocessed;
             unprocessed = 0;
 
+            terminal.set_last_processed_bytes(processed);
+
             // Assure we're not blocking the terminal too long unnecessarily.
             if processed >= MAX_LOCKED_READ {
                 break;

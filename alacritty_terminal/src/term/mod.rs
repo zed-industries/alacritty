@@ -302,6 +302,9 @@ pub struct Term<T> {
 
     /// Information about damaged cells.
     damage: TermDamageState,
+
+    /// The number of bytes processed in the last read from the pty.
+    last_processed_bytes: usize,
 }
 
 impl<T> Term<T> {
@@ -361,6 +364,7 @@ impl<T> Term<T> {
             title_stack: Vec::new(),
             selection: None,
             damage,
+            last_processed_bytes: 0,
         }
     }
 
@@ -878,6 +882,16 @@ impl<T> Term<T> {
 
     pub fn colors(&self) -> &Colors {
         &self.colors
+    }
+
+    ///Sets the last processed bytes. Should only be called by the PTY reader.
+    pub fn set_last_processed_bytes(&mut self, bytes: usize) {
+        self.last_processed_bytes = bytes;
+    }
+
+    ///Get the bytes read by the last PTY read.
+    pub fn last_processed_bytes(&self) -> usize {
+        self.last_processed_bytes
     }
 
     /// Insert a linebreak at the current cursor position.
