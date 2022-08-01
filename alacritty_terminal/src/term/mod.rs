@@ -884,14 +884,16 @@ impl<T> Term<T> {
         &self.colors
     }
 
-    ///Sets the last processed bytes. Should only be called by the PTY reader.
-    pub fn set_last_processed_bytes(&mut self, bytes: usize) {
-        self.last_processed_bytes = bytes;
+    ///Add the last processed bytes. Should only be called by the PTY reader.
+    pub fn add_last_processed_bytes(&mut self, bytes: usize) {
+        self.last_processed_bytes = self.last_processed_bytes + bytes;
     }
 
-    ///Get the bytes read by the last PTY read.
-    pub fn last_processed_bytes(&self) -> usize {
-        self.last_processed_bytes
+    ///Get the bytes read by the last pty_read and clear the current counter
+    pub fn take_last_processed_bytes(&mut self) -> usize {
+        let ret = self.last_processed_bytes;
+        self.last_processed_bytes = 0;
+        ret
     }
 
     /// Insert a linebreak at the current cursor position.
