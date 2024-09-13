@@ -55,6 +55,8 @@ pub enum Event {
 
     /// Child process exited with an error code.
     ChildExit(i32),
+
+    Osc133(vte::ansi::Osc133Command),
 }
 
 impl Debug for Event {
@@ -73,6 +75,7 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(code) => write!(f, "ChildExit({code})"),
+            Event::Osc133(command) => write!(f, "Osc133({command:?})")
         }
     }
 }
