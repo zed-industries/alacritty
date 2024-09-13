@@ -2236,6 +2236,34 @@ impl<T: EventListener> Handler for Term<T> {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
+
+    #[inline]
+    fn handle_osc133(&mut self, command: vte::ansi::Osc133Command) {
+        match command {
+            ansi::Osc133Command::FreshLine => {},
+            ansi::Osc133Command::FreshLineAndStartPrompt { .. } => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Prompt)
+            },
+            ansi::Osc133Command::MarkEndOfCommandWithFreshLine { .. } => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Prompt)
+            },
+            ansi::Osc133Command::StartPrompt(_) => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Prompt)
+            },
+            ansi::Osc133Command::MarkEndOfPromptAndStartOfInputUntilNextMarker => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Input)
+            },
+            ansi::Osc133Command::MarkEndOfPromptAndStartOfInputUntilEndOfLine => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Input)
+            },
+            ansi::Osc133Command::MarkEndOfInputAndStartOfOutput { .. } => {
+                self.grid.cursor.template.set_cell_type(cell::Osc133CellType::Output)
+            },
+            ansi::Osc133Command::CommandStatus { .. } => {},
+        }
+
+        self.event_proxy.send_event(Event::Osc133(command));
+    }
 }
 
 /// The state of the [`Mode`] and [`PrivateMode`].

@@ -41,6 +41,14 @@ static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum Osc133CellType {
+    Prompt,
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Hyperlink {
     inner: Arc<HyperlinkInner>,
 }
@@ -128,9 +136,11 @@ pub struct CellExtra {
     underline_color: Option<Color>,
 
     hyperlink: Option<Hyperlink>,
+
+    cell_type: Option<Osc133CellType>,
 }
 
-/// Content and attributes of a single cell in the terminal grid.
+/// Content and attriGridCelltes of a single cell in the terminal grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Cell {
@@ -215,10 +225,20 @@ impl Cell {
         }
     }
 
+    pub fn set_cell_type(&mut self, cell_type: Osc133CellType) {
+        let extra = self.extra.get_or_insert(Default::default());
+        Arc::make_mut(extra).cell_type = Some(cell_type);
+    }
+
     /// Hyperlink stored in this cell.
     #[inline]
     pub fn hyperlink(&self) -> Option<Hyperlink> {
         self.extra.as_ref()?.hyperlink.clone()
+    }
+
+    #[inline]
+    pub fn cell_type(&self) -> Option<Osc133CellType> {
+        self.extra.as_ref()?.cell_type.clone()
     }
 }
 
