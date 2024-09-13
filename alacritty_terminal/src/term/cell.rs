@@ -235,6 +235,11 @@ impl Cell {
     pub fn hyperlink(&self) -> Option<Hyperlink> {
         self.extra.as_ref()?.hyperlink.clone()
     }
+
+    #[inline]
+    pub fn cell_type(&self) -> Option<Osc133CellType> {
+        self.extra.as_ref()?.cell_type.clone()
+    }
 }
 
 impl GridCell for Cell {
