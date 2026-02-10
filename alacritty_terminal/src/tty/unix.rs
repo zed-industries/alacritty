@@ -14,15 +14,29 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::{env, ptr};
 
-use libc::{F_GETFL, F_SETFL, O_NONBLOCK, TIOCSCTTY, c_int, fcntl};
+use libc::{c_int, fcntl, F_GETFL, F_SETFL, O_NONBLOCK, TIOCSCTTY};
 use log::error;
+#[cfg(target_os = "macos")]
+use mach2::exception_types::{
+    exception_behavior_t, exception_mask_t, EXCEPTION_DEFAULT, EXC_MASK_ALL,
+};
+#[cfg(target_os = "macos")]
+use mach2::kern_return::kern_return_t;
+#[cfg(target_os = "macos")]
+use mach2::mach_types::task_t;
+#[cfg(target_os = "macos")]
+use mach2::port::{mach_port_t, MACH_PORT_NULL};
+#[cfg(target_os = "macos")]
+use mach2::thread_status::{thread_state_flavor_t, THREAD_STATE_NONE};
+#[cfg(target_os = "macos")]
+use mach2::traps::mach_task_self;
 use polling::{Event, PollMode, Poller};
 use rustix_openpty::openpty;
 use rustix_openpty::rustix::termios::Winsize;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use rustix_openpty::rustix::termios::{self, InputModes, OptionalActions};
 use signal_hook::low_level::{pipe as signal_pipe, unregister as unregister_signal};
-use signal_hook::{SigId, consts as sigconsts};
+use signal_hook::{consts as sigconsts, SigId};
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::{ChildEvent, EventedPty, EventedReadWrite, Options};
@@ -53,6 +67,29 @@ fn set_controlling_terminal(fd: c_int) {
 
     if res < 0 {
         die!("ioctl TIOCSCTTY failed: {}", Error::last_os_error());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reset_exception_ports() {
+    unsafe extern "C" {
+        fn task_set_exception_ports(
+            task: task_t,
+            exception_mask: exception_mask_t,
+            new_port: mach_port_t,
+            behavior: exception_behavior_t,
+            new_flavor: thread_state_flavor_t,
+        ) -> kern_return_t;
+    }
+
+    unsafe {
+        let _kern_return = task_set_exception_ports(
+            mach_task_self(),
+            EXC_MASK_ALL,
+            MACH_PORT_NULL,
+            EXCEPTION_DEFAULT as exception_behavior_t,
+            THREAD_STATE_NONE,
+        );
     }
 }
 
@@ -249,6 +286,9 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
             if err == -1 {
                 return Err(Error::other("Failed to set session id"));
             }
+
+            #[cfg(target_os = "macos")]
+            reset_exception_ports();
 
             // Set working directory, ignoring invalid paths.
             if let Some(working_directory) = working_directory.as_ref() {
