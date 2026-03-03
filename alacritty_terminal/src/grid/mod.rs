@@ -31,6 +31,7 @@ pub trait GridCell: Sized {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Cursor<T> {
     /// The location of this cursor.
     pub point: Point,
@@ -39,6 +40,7 @@ pub struct Cursor<T> {
     pub template: T,
 
     /// Currently configured graphic character sets.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub charsets: Charsets,
 
     /// Tracks if the next call to input will need to first handle wrapping.
@@ -109,11 +111,11 @@ pub enum Scroll {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Grid<T> {
     /// Current cursor for writing data.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub cursor: Cursor<T>,
 
     /// Last saved cursor.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub saved_cursor: Cursor<T>,
 
     /// Lines in the grid. Each row holds a list of cells corresponding to the

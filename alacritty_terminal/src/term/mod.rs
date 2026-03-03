@@ -29,6 +29,7 @@ use crate::vte::ansi::{
 pub mod cell;
 pub mod color;
 pub mod search;
+pub mod serialize;
 
 /// Minimum number of columns.
 ///
@@ -639,6 +640,40 @@ impl<T> Term<T> {
         T: EventListener,
     {
         RenderableContent::new(self)
+    }
+
+    /// Capture a snapshot of the terminal's serialisable state.
+    ///
+    /// The returned [`serialize::TermState`] can be serialised with any
+    /// serde-compatible format (bincode, JSON, …) and later applied to a
+    /// fresh `Term` via [`Term::restore`].
+    #[cfg(feature = "serde")]
+    pub fn snapshot(&self) -> serialize::TermState {
+        serialize::TermState {
+            grid: self.grid.clone(),
+            inactive_grid: self.inactive_grid.clone(),
+            mode_bits: self.mode.bits(),
+            scroll_region: self.scroll_region.clone(),
+        }
+    }
+
+    /// Restore terminal state from a [`serialize::TermState`] snapshot.
+    ///
+    /// This overwrites the grid buffers, mode flags, and scroll region.
+    /// Damage tracking is marked as full so the renderer repaints
+    /// everything on the next frame.
+    ///
+    /// The `Term` should have been created with [`Term::new`] using the same
+    /// (or compatible) dimensions. Fields not captured in `TermState` (tab
+    /// stops, charsets, title, keyboard mode stack, …) retain their values
+    /// from the `Term` that `restore` is called on.
+    #[cfg(feature = "serde")]
+    pub fn restore(&mut self, state: serialize::TermState) {
+        self.grid = state.grid;
+        self.inactive_grid = state.inactive_grid;
+        self.mode = TermMode::from_bits_truncate(state.mode_bits);
+        self.scroll_region = state.scroll_region;
+        self.mark_fully_damaged();
     }
 
     /// Access to the raw grid data structure.

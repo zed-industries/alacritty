@@ -45,4 +45,5 @@ windows-sys = { version = "0.59.0", features = [
 ]}
 
 [dev-dependencies]
+bincode = { version = "2", features = ["serde"] }
 serde_json = "1.0.0"
