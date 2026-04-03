@@ -408,6 +408,30 @@ impl<T> Term<T> {
         }
     }
 
+    /// Scroll the display, automatically decompressing compressed scrollback
+    /// rows if the scroll target reaches into compressed history.
+    #[inline]
+    pub fn scroll_display_with_thaw(&mut self, scroll: Scroll)
+    where
+        T: EventListener,
+    {
+        let old_display_offset = self.grid.display_offset();
+        self.grid.scroll_display_with_thaw(scroll);
+        self.event_proxy.send_event(Event::MouseCursorDirty);
+
+        // Clamp vi mode cursor to the viewport.
+        let viewport_start = -(self.grid.display_offset() as i32);
+        let viewport_end = viewport_start + self.bottommost_line().0;
+        let vi_cursor_line = &mut self.vi_mode_cursor.point.line.0;
+        *vi_cursor_line = cmp::min(viewport_end, cmp::max(viewport_start, *vi_cursor_line));
+        self.vi_mode_recompute_selection();
+
+        // Damage everything if display offset changed.
+        if old_display_offset != self.grid().display_offset() {
+            self.mark_fully_damaged();
+        }
+    }
+
     pub fn new<D: Dimensions>(config: Config, dimensions: &D, event_proxy: T) -> Term<T> {
         let num_cols = dimensions.columns();
         let num_lines = dimensions.screen_lines();
