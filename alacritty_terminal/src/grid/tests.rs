@@ -639,6 +639,106 @@ fn visible_lines_unchanged_after_compress_thaw() {
 }
 
 #[test]
+fn compact_scrollback_if_needed_noop_is_cheap() {
+    let screen = 24;
+    let columns = 160;
+    // History is below threshold (2 × 24 = 48), so compact_scrollback_if_needed
+    // should be a no-op every time.
+    let history = 40;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    assert!(grid.history_size() <= screen * 2);
+
+    let iterations = 10_000;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        grid.compact_scrollback_if_needed();
+    }
+    let elapsed = start.elapsed();
+
+    // 10,000 no-op calls should complete in under 5ms (just a comparison).
+    assert!(
+        elapsed.as_millis() < 5,
+        "No-op compact_scrollback_if_needed took {elapsed:?} for {iterations} calls"
+    );
+}
+
+#[test]
+fn compression_throughput() {
+    let columns = 160;
+    let rows_to_compress = 1000;
+
+    // Build diverse rows for compression.
+    let mut rows = Vec::with_capacity(rows_to_compress);
+    let colours = [
+        Color::Named(NamedColor::Red),
+        Color::Named(NamedColor::Green),
+        Color::Named(NamedColor::Blue),
+    ];
+    let default_bg = Color::Named(NamedColor::Background);
+
+    for n in 0..rows_to_compress {
+        let mut row = super::row::Row::<Cell>::new(columns);
+        let text_len = match n % 5 {
+            0 => 0,
+            1 => 20 + (n % 40),
+            2 => 60 + (n % 40),
+            _ => columns,
+        };
+        let fg = colours[n % colours.len()];
+        for col in 0..text_len {
+            row[Column(col)] = colored_cell(
+                (b'!' + ((n + col) % 94) as u8) as char,
+                fg,
+                default_bg,
+            );
+        }
+        if n % 3 == 0 && text_len == columns {
+            row[Column(columns - 1)].flags.insert(Flags::WRAPLINE);
+        }
+        rows.push(row);
+    }
+
+    // Measure compression.
+    let start = std::time::Instant::now();
+    let compressed: Vec<_> = rows.iter().map(super::compact::CompactRow::compress).collect();
+    let compress_elapsed = start.elapsed();
+
+    // Measure decompression.
+    let start = std::time::Instant::now();
+    let decompressed: Vec<_> = compressed.iter().map(super::compact::CompactRow::decompress).collect();
+    let decompress_elapsed = start.elapsed();
+
+    let compress_us_per_row = compress_elapsed.as_micros() as f64 / rows_to_compress as f64;
+    let decompress_us_per_row = decompress_elapsed.as_micros() as f64 / rows_to_compress as f64;
+
+    eprintln!(
+        "Compression:   {rows_to_compress} rows in {compress_elapsed:?} ({compress_us_per_row:.1} µs/row)"
+    );
+    eprintln!(
+        "Decompression: {rows_to_compress} rows in {decompress_elapsed:?} ({decompress_us_per_row:.1} µs/row)"
+    );
+
+    // Verify round-trip.
+    for (orig, restored) in rows.iter().zip(decompressed.iter()) {
+        for col in 0..columns {
+            assert_eq!(orig[Column(col)], restored[Column(col)]);
+        }
+    }
+
+    // Decompression must be fast enough for scrolling: a screenful (24 rows)
+    // should decompress in under 1ms. Only assert in release builds — debug
+    // builds are ~10× slower and would false-positive.
+    let screenful_us = decompress_us_per_row * 24.0;
+    #[cfg(not(debug_assertions))]
+    assert!(
+        screenful_us < 1000.0,
+        "Decompressing 24 rows would take {screenful_us:.0} µs, want < 1000 µs"
+    );
+    let _ = screenful_us;
+}
+
+#[test]
 fn compact_scrollback_if_needed_compresses_when_over_threshold() {
     let screen = 10;
     let columns = 40;
