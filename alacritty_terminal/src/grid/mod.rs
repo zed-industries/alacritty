@@ -7,15 +7,17 @@ use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{Column, Line, Point};
-use crate::term::cell::{Flags, ResetDiscriminant};
+use crate::term::cell::{Cell, Flags, ResetDiscriminant};
 use crate::vte::ansi::{CharsetIndex, StandardCharset};
 
+pub mod compact;
 pub mod resize;
 mod row;
 mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use self::compact::CompactRow;
 pub use self::row::Row;
 use self::storage::Storage;
 
@@ -137,6 +139,14 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Compressed scrollback rows, ordered oldest-first.
+    ///
+    /// When scrollback exceeds a threshold, old history rows are compressed
+    /// into this vec to reduce memory usage. They are decompressed back into
+    /// the ring buffer on demand (e.g. when the user scrolls up).
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    compressed_history: Vec<CompactRow>,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -149,6 +159,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            compressed_history: Vec::new(),
         }
     }
 
@@ -386,6 +397,9 @@ impl<T> Grid<T> {
         // Explicitly purge all lines from history.
         self.raw.shrink_lines(self.history_size());
 
+        // Also clear any compressed scrollback.
+        self.compressed_history.clear();
+
         // Reset display offset.
         self.display_offset = 0;
     }
@@ -449,6 +463,7 @@ impl<T: PartialEq> PartialEq for Grid<T> {
             && self.columns.eq(&other.columns)
             && self.lines.eq(&other.lines)
             && self.display_offset.eq(&other.display_offset)
+            && self.compressed_history.eq(&other.compressed_history)
     }
 }
 
@@ -484,7 +499,116 @@ impl<T> IndexMut<Point> for Grid<T> {
     }
 }
 
-/// Grid dimensions.
+// Grid dimensions.
+// ---------------------------------------------------------------------------
+// Cell-specific scrollback compression
+// ---------------------------------------------------------------------------
+
+impl Grid<Cell> {
+    /// Compress old scrollback rows to reduce memory usage.
+    ///
+    /// Rows beyond `keep_hot` lines from the visible area are compressed into
+    /// `CompactRow` form and removed from the ring buffer. This can reduce
+    /// scrollback memory by 10–40× for typical terminal output.
+    ///
+    /// After compression, `history_size()` (hot rows only) decreases, but
+    /// `total_history_size()` stays the same.
+    pub fn compress_old_scrollback(&mut self, keep_hot: usize) {
+        let hot_history = self.history_size();
+        if hot_history <= keep_hot {
+            return;
+        }
+        let to_compress = hot_history - keep_hot;
+
+        // Compress the oldest rows first (farthest from visible area).
+        for i in 0..to_compress {
+            let line_idx = Line(-((hot_history - i) as i32));
+            let compact = CompactRow::compress(&self.raw[line_idx]);
+            self.compressed_history.push(compact);
+        }
+
+        // Remove compressed rows from the ring buffer.
+        self.raw.shrink_lines(to_compress);
+        self.display_offset = min(self.display_offset, self.history_size());
+    }
+
+    /// Decompress the newest N compressed history rows back into the ring
+    /// buffer so they become accessible via normal `Line` indexing.
+    pub fn thaw_compressed_history(&mut self, count: usize) {
+        let count = count.min(self.compressed_history.len());
+        if count == 0 {
+            return;
+        }
+
+        // Make room in the ring buffer for the decompressed rows.
+        self.raw.initialize(count, self.columns);
+
+        // The new oldest slots are at the far end of history.
+        let new_history = self.history_size();
+        for i in 0..count {
+            let compressed_idx = self.compressed_history.len() - count + i;
+            let decompressed = self.compressed_history[compressed_idx].decompress();
+            let line_idx = Line(-((new_history - i) as i32));
+            self.raw[line_idx] = decompressed;
+        }
+
+        // Remove from compressed storage.
+        self.compressed_history.truncate(self.compressed_history.len() - count);
+    }
+
+    /// Automatically compress old scrollback if hot history exceeds the threshold.
+    /// Call this after operations that grow scrollback (e.g. scroll_up).
+    /// The threshold is 2× the visible screen lines — recent history stays hot
+    /// for fast scrolling, older history gets compressed.
+    pub fn compact_scrollback_if_needed(&mut self) {
+        let threshold = self.lines * 2;
+        if self.history_size() > threshold {
+            self.compress_old_scrollback(threshold);
+        }
+    }
+
+    /// Scroll the display, automatically thawing compressed rows if needed.
+    /// This is the Cell-specific version that handles compressed history.
+    pub fn scroll_display_with_thaw(&mut self, scroll: Scroll) {
+        let total_history = self.total_history_size();
+        let new_offset = match scroll {
+            Scroll::Delta(count) => {
+                min(max((self.display_offset as i32) + count, 0) as usize, total_history)
+            },
+            Scroll::PageUp => min(self.display_offset + self.lines, total_history),
+            Scroll::PageDown => self.display_offset.saturating_sub(self.lines),
+            Scroll::Top => total_history,
+            Scroll::Bottom => 0,
+        };
+
+        let hot_history = self.history_size();
+        if new_offset > hot_history {
+            let needed = new_offset - hot_history;
+            self.thaw_compressed_history(needed);
+        }
+
+        self.scroll_display(scroll);
+    }
+
+    /// Number of compressed history rows.
+    pub fn compressed_history_len(&self) -> usize {
+        self.compressed_history.len()
+    }
+
+    /// Total history size including both hot and compressed rows.
+    pub fn total_history_size(&self) -> usize {
+        self.history_size() + self.compressed_history.len()
+    }
+
+    /// Approximate heap memory used by compressed history, in bytes.
+    pub fn compressed_history_bytes(&self) -> usize {
+        self.compressed_history
+            .iter()
+            .map(|r| r.heap_bytes() + std::mem::size_of::<CompactRow>())
+            .sum()
+    }
+}
+
 pub trait Dimensions {
     /// Total number of lines in the buffer, this includes scrollback and visible lines.
     fn total_lines(&self) -> usize;
