@@ -562,8 +562,9 @@ impl Grid<Cell> {
     /// for fast scrolling, older history gets compressed.
     pub fn compact_scrollback_if_needed(&mut self) {
         let threshold = self.lines * 2;
-        if self.history_size() > threshold {
-            self.compress_old_scrollback(threshold);
+        let keep_hot = max(threshold, self.display_offset + self.lines);
+        if self.history_size() > keep_hot {
+            self.compress_old_scrollback(keep_hot);
         }
     }
 
