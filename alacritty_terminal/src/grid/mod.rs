@@ -608,6 +608,12 @@ impl Grid<Cell> {
             .map(|r| r.heap_bytes() + std::mem::size_of::<CompactRow>())
             .sum()
     }
+
+    /// Line farthest up in the grid including compressed history.
+    /// Use this instead of `topmost_line()` when the caller can thaw on demand.
+    pub fn total_topmost_line(&self) -> Line {
+        Line(-(self.total_history_size() as i32))
+    }
 }
 
 pub trait Dimensions {
