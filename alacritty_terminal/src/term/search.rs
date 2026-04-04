@@ -119,7 +119,7 @@ impl LazyDfa {
 impl<T> Term<T> {
     /// Get next search match in the specified direction.
     pub fn search_next(
-        &self,
+        &mut self,
         regex: &mut RegexSearch,
         mut origin: Point,
         direction: Direction,
@@ -138,7 +138,7 @@ impl<T> Term<T> {
 
     /// Find the next match to the right of the origin.
     fn next_match_right(
-        &self,
+        &mut self,
         regex: &mut RegexSearch,
         origin: Point,
         side: Side,
@@ -177,7 +177,7 @@ impl<T> Term<T> {
 
     /// Find the next match to the left of the origin.
     fn next_match_left(
-        &self,
+        &mut self,
         regex: &mut RegexSearch,
         origin: Point,
         side: Side,
@@ -226,7 +226,7 @@ impl<T> Term<T> {
     ///
     /// The origin is always included in the regex.
     pub fn regex_search_left(
-        &self,
+        &mut self,
         regex: &mut RegexSearch,
         start: Point,
         end: Point,
@@ -242,7 +242,7 @@ impl<T> Term<T> {
     ///
     /// The origin is always included in the regex.
     pub fn regex_search_right(
-        &self,
+        &mut self,
         regex: &mut RegexSearch,
         start: Point,
         end: Point,
@@ -257,7 +257,7 @@ impl<T> Term<T> {
     /// Find the next regex match.
     ///
     /// This will always return the side of the first match which is farthest from the start point.
-    fn regex_search(&self, start: Point, end: Point, regex: &mut LazyDfa) -> Option<Point> {
+    fn regex_search(&mut self, start: Point, end: Point, regex: &mut LazyDfa) -> Option<Point> {
         match self.regex_search_internal(start, end, regex) {
             Ok(regex_match) => regex_match,
             Err(err) => {
@@ -272,11 +272,19 @@ impl<T> Term<T> {
     ///
     /// To automatically log regex complexity errors, use [`Self::regex_search`] instead.
     fn regex_search_internal(
-        &self,
+        &mut self,
         start: Point,
         end: Point,
         regex: &mut LazyDfa,
     ) -> Result<Option<Point>, Box<dyn Error>> {
+        // Thaw all compressed scrollback so the search can see the full history.
+        // This happens lazily at search time — rows stay compressed until a
+        // search actually executes.
+        let compressed = self.grid().compressed_history_len();
+        if compressed > 0 {
+            self.grid_mut().thaw_compressed_history(compressed);
+        }
+        
         let topmost_line = self.topmost_line();
         let screen_lines = self.screen_lines() as i32;
         let last_column = self.last_column();
@@ -622,7 +630,7 @@ pub struct RegexIter<'a, T> {
     end: Point,
     direction: Direction,
     regex: &'a mut RegexSearch,
-    term: &'a Term<T>,
+    term: &'a mut Term<T>,
     done: bool,
 }
 
@@ -631,7 +639,7 @@ impl<'a, T> RegexIter<'a, T> {
         start: Point,
         end: Point,
         direction: Direction,
-        term: &'a Term<T>,
+        term: &'a mut Term<T>,
         regex: &'a mut RegexSearch,
     ) -> Self {
         Self { point: start, done: false, end, direction, term, regex }
@@ -695,7 +703,7 @@ mod tests {
     #[test]
     fn regex_right() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             testing66\r\n\
             Alacritty\n\
             123\r\n\
@@ -715,7 +723,7 @@ mod tests {
     #[test]
     fn regex_left() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             testing66\r\n\
             Alacritty\n\
             123\r\n\
@@ -735,7 +743,7 @@ mod tests {
     #[test]
     fn nested_regex() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             Ala -> Alacritty -> critty\r\n\
             critty\
         ");
@@ -756,7 +764,7 @@ mod tests {
     #[test]
     fn no_match_right() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             first line\n\
             broken second\r\n\
             third\
@@ -771,7 +779,7 @@ mod tests {
     #[test]
     fn no_match_left() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             first line\n\
             broken second\r\n\
             third\
@@ -786,7 +794,7 @@ mod tests {
     #[test]
     fn include_linebreak_left() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             testing123\r\n\
             xxx\
         ");
@@ -803,7 +811,7 @@ mod tests {
     #[test]
     fn include_linebreak_right() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             xxx\r\n\
             testing123\
         ");
@@ -818,7 +826,7 @@ mod tests {
 
     #[test]
     fn skip_dead_cell() {
-        let term = mock_term("alacritty");
+        let mut term = mock_term("alacritty");
 
         // Make sure dead state cell is skipped when reversing.
         let mut regex = RegexSearch::new("alacrit").unwrap();
@@ -829,7 +837,7 @@ mod tests {
 
     #[test]
     fn reverse_search_dead_recovery() {
-        let term = mock_term("zooo lense");
+        let mut term = mock_term("zooo lense");
 
         // Make sure the reverse DFA operates the same as a forward DFA.
         let mut regex = RegexSearch::new("zoo").unwrap();
@@ -842,7 +850,7 @@ mod tests {
 
     #[test]
     fn multibyte_unicode() {
-        let term = mock_term("testвосибing");
+        let mut term = mock_term("testвосибing");
 
         let mut regex = RegexSearch::new("te.*ing").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -857,7 +865,7 @@ mod tests {
 
     #[test]
     fn end_on_multibyte_unicode() {
-        let term = mock_term("testвосиб");
+        let mut term = mock_term("testвосиб");
 
         let mut regex = RegexSearch::new("te.*и").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -868,7 +876,7 @@ mod tests {
 
     #[test]
     fn fullwidth() {
-        let term = mock_term("a🦇x🦇");
+        let mut term = mock_term("a🦇x🦇");
 
         let mut regex = RegexSearch::new("[^ ]*").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -883,7 +891,7 @@ mod tests {
 
     #[test]
     fn singlecell_fullwidth() {
-        let term = mock_term("🦇");
+        let mut term = mock_term("🦇");
 
         let mut regex = RegexSearch::new("🦇").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -898,7 +906,7 @@ mod tests {
 
     #[test]
     fn end_on_fullwidth() {
-        let term = mock_term("jarr🦇");
+        let mut term = mock_term("jarr🦇");
 
         let start = Point::new(Line(0), Column(0));
         let end = Point::new(Line(0), Column(4));
@@ -919,7 +927,7 @@ mod tests {
     #[test]
     fn wrapping() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             xxx\r\n\
             xxx\
         ");
@@ -940,7 +948,7 @@ mod tests {
     #[test]
     fn wrapping_into_fullwidth() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             🦇xx\r\n\
             xx🦇\
         ");
@@ -963,7 +971,7 @@ mod tests {
     #[test]
     fn multiline() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             test \r\n\
             test\
         ");
@@ -986,7 +994,7 @@ mod tests {
     #[test]
     fn empty_match() {
         #[rustfmt::skip]
-        let term = mock_term(" abc ");
+        let mut term = mock_term(" abc ");
 
         const PATTERN: &str = "[a-z]*";
         let mut regex = RegexSearch::new(PATTERN).unwrap();
@@ -1000,7 +1008,7 @@ mod tests {
     #[test]
     fn empty_match_multibyte() {
         #[rustfmt::skip]
-        let term = mock_term(" ↑");
+        let mut term = mock_term(" ↑");
 
         const PATTERN: &str = "[a-z]*";
         let mut regex = RegexSearch::new(PATTERN).unwrap();
@@ -1012,7 +1020,7 @@ mod tests {
     #[test]
     fn empty_match_multiline() {
         #[rustfmt::skip]
-        let term = mock_term("abc          \nxxx");
+        let mut term = mock_term("abc          \nxxx");
 
         const PATTERN: &str = "[a-z]*";
         let mut regex = RegexSearch::new(PATTERN).unwrap();
@@ -1074,14 +1082,14 @@ mod tests {
         let start = Point::new(Line(0), Column(0));
         let end = Point::new(Line(0), Column(1));
 
-        let mut iter = RegexIter::new(start, end, Direction::Right, &term, &mut regex);
+        let mut iter = RegexIter::new(start, end, Direction::Right, &mut term, &mut regex);
         assert_eq!(iter.next(), None);
     }
 
     #[test]
     fn wrap_around_to_another_end() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             abc\r\n\
             def\
         ");
@@ -1110,7 +1118,7 @@ mod tests {
 
     #[test]
     fn runtime_cache_error() {
-        let term = mock_term(&str::repeat("i", 9999));
+        let mut term = mock_term(&str::repeat("i", 9999));
 
         let mut regex = RegexSearch::new("[0-9A-Za-z]{9999}").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -1121,7 +1129,7 @@ mod tests {
     #[test]
     fn greed_is_good() {
         #[rustfmt::skip]
-        let term = mock_term("https://github.com");
+        let mut term = mock_term("https://github.com");
 
         // Bottom to top.
         let mut regex = RegexSearch::new("/github.com|https://github.com").unwrap();
@@ -1133,7 +1141,7 @@ mod tests {
     #[test]
     fn anchored_empty() {
         #[rustfmt::skip]
-        let term = mock_term("rust");
+        let mut term = mock_term("rust");
 
         // Bottom to top.
         let mut regex = RegexSearch::new(";*|rust").unwrap();
@@ -1145,7 +1153,7 @@ mod tests {
     #[test]
     fn newline_breaking_semantic() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             test abc\r\n\
             def test\
         ");
@@ -1166,7 +1174,7 @@ mod tests {
     #[test]
     fn inline_word_search() {
         #[rustfmt::skip]
-        let term = mock_term("\
+        let mut term = mock_term("\
             word word word word w\n\
             ord word word word\
         ");
@@ -1193,7 +1201,7 @@ mod tests {
 
     #[test]
     fn fullwidth_across_lines() {
-        let term = mock_term("a🦇\n🦇b");
+        let mut term = mock_term("a🦇\n🦇b");
 
         let mut regex = RegexSearch::new("🦇🦇").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -1212,7 +1220,7 @@ mod tests {
 
     #[test]
     fn fullwidth_into_halfwidth_across_lines() {
-        let term = mock_term("a🦇\nxab");
+        let mut term = mock_term("a🦇\nxab");
 
         let mut regex = RegexSearch::new("🦇x").unwrap();
         let start = Point::new(Line(0), Column(0));
@@ -1248,4 +1256,144 @@ mod tests {
         let match_end = Point::new(Line(0), Column(2));
         assert_eq!(term.regex_search_left(&mut regex, start, end), Some(match_end..=match_start));
     }
+}
+
+
+
+#[cfg(test)]
+mod compressed_search_tests {
+    use crate::event::VoidListener;
+    use crate::grid::Dimensions;
+    use crate::index::{Column, Point};
+    use crate::term::Config;
+    use crate::term::search::RegexSearch;
+    use crate::term::test::TermSize;
+    use crate::vte::ansi::Handler;
+
+    /// Build a term with scrollback history that contains a unique marker
+    /// string buried deep in the history.
+    fn term_with_marker_in_history() -> crate::term::Term<VoidListener> {
+        let columns = 40;
+        let screen_lines = 10;
+        let history_limit = 200;
+
+        let mut config = Config::default();
+        config.scrolling_history = history_limit;
+        let size = TermSize::new(columns, screen_lines);
+        let mut term = crate::term::Term::new(config, &size, VoidListener);
+
+        // Write 100 lines of filler, pushing them into scrollback.
+        for i in 0..100 {
+            let text = format!("filler-line-{:04}", i);
+            for c in text.chars() {
+                term.input(c);
+            }
+            term.carriage_return();
+            term.linefeed();
+        }
+
+        // Write the unique marker.
+        let marker = "UNIQUE_SEARCH_MARKER_XYZ";
+        for c in marker.chars() {
+            term.input(c);
+        }
+        term.carriage_return();
+        term.linefeed();
+
+        // Write more filler to push the marker deeper into history.
+        for i in 0..50 {
+            let text = format!("after-marker-{:04}", i);
+            for c in text.chars() {
+                term.input(c);
+            }
+            term.carriage_return();
+            term.linefeed();
+        }
+
+        term
+    }
+
+    #[test]
+    fn search_finds_marker_in_uncompressed_history() {
+        let mut term = term_with_marker_in_history();
+
+        // Sanity check: the marker should be findable in uncompressed history.
+        let mut regex = RegexSearch::new("UNIQUE_SEARCH_MARKER_XYZ").unwrap();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let result = term.regex_search_right(&mut regex, start, end);
+        assert!(result.is_some(), "Marker should be found in uncompressed scrollback");
+    }
+
+    #[test]
+    fn search_misses_marker_in_compressed_history() {
+        let mut term = term_with_marker_in_history();
+
+        // Compress most of the history, keeping only a small hot buffer.
+        // The marker is ~50 lines from the bottom of history, so keeping
+        // only 10 hot lines should compress it away.
+        term.grid_mut().compress_old_scrollback(10);
+        assert!(
+            term.grid().compressed_history_len() > 0,
+            "Should have compressed some history"
+        );
+
+        // Search using the current (hot-only) topmost_line -- this should
+        // NOT find the marker because it's in compressed territory.
+        let mut regex = RegexSearch::new("UNIQUE_SEARCH_MARKER_XYZ").unwrap();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let result = term.regex_search_right(&mut regex, start, end);
+        assert!(
+            result.is_none(),
+            "Marker should NOT be found when compressed (this demonstrates the bug)"
+        );
+    }
+
+    #[test]
+    fn search_finds_marker_after_thaw() {
+        let mut term = term_with_marker_in_history();
+
+        term.grid_mut().compress_old_scrollback(10);
+        let compressed = term.grid().compressed_history_len();
+        assert!(compressed > 0);
+
+        // Thaw everything, then search -- marker should be found.
+        term.grid_mut().thaw_compressed_history(compressed);
+        assert_eq!(term.grid().compressed_history_len(), 0);
+
+        let mut regex = RegexSearch::new("UNIQUE_SEARCH_MARKER_XYZ").unwrap();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let result = term.regex_search_right(&mut regex, start, end);
+        assert!(result.is_some(), "Marker should be found after thawing compressed history");
+    }
+
+    #[test]
+    fn search_finds_marker_through_compressed_history_automatically() {
+        let mut term = term_with_marker_in_history();
+
+        // Compress most of the history.
+        term.grid_mut().compress_old_scrollback(10);
+        assert!(term.grid().compressed_history_len() > 0);
+
+        // Search using total_topmost_line -- the search should thaw
+        // compressed rows automatically and find the marker.
+        let mut regex = RegexSearch::new("UNIQUE_SEARCH_MARKER_XYZ").unwrap();
+        let start = Point::new(term.grid().total_topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let result = term.regex_search_right(&mut regex, start, end);
+        assert!(
+            result.is_some(),
+            "Search should find marker in compressed history via automatic thaw"
+        );
+
+        // After the search, compressed history should have been thawed.
+        assert_eq!(
+            term.grid().compressed_history_len(),
+            0,
+            "All compressed rows should have been thawed during search"
+        );
+    }
+
 }

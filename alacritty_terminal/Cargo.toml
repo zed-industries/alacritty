@@ -26,6 +26,8 @@ regex-automata = "0.4.3"
 unicode-width = "0.2.0"
 vte = { version = "0.15.0", default-features = false, features = ["std", "ansi"] }
 serde = { version = "1", features = ["derive", "rc"], optional = true }
+bincode = { version = "2", features = ["serde"] }
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 rustix-openpty = "0.2.0"

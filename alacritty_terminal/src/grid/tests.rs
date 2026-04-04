@@ -3,6 +3,7 @@
 use super::*;
 
 use crate::term::cell::Cell;
+use crate::vte::ansi::{Color, NamedColor};
 
 impl GridCell for usize {
     fn is_empty(&self) -> bool {
@@ -388,3 +389,468 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+fn colored_cell(c: char, fg: Color, bg: Color) -> Cell {
+    Cell { c, fg, bg, ..Cell::default() }
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback compression integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a grid with `history_lines` of scrollback, each containing
+/// identifiable content based on the line number.
+fn grid_with_scrollback(
+    screen_lines: usize,
+    columns: usize,
+    history_lines: usize,
+) -> Grid<Cell> {
+    let mut grid = Grid::<Cell>::new(screen_lines, columns, history_lines);
+
+    let colours = [
+        Color::Named(NamedColor::Red),
+        Color::Named(NamedColor::Green),
+        Color::Named(NamedColor::Blue),
+        Color::Named(NamedColor::Yellow),
+        Color::Named(NamedColor::Cyan),
+    ];
+    let default_bg = Color::Named(NamedColor::Background);
+
+    // Scroll up `history_lines` times, filling each line with content.
+    for n in 0..history_lines {
+        // Write identifiable content into the top visible line before scrolling.
+        let text_len = 5 + (n % (columns - 5));
+        let fg = colours[n % colours.len()];
+        for col in 0..text_len {
+            let c = (b'!' + ((n + col) % 94) as u8) as char;
+            grid[Line(0)][Column(col)] = colored_cell(c, fg, default_bg);
+        }
+        if n % 3 == 0 {
+            grid[Line(0)][Column(columns - 1)].flags.insert(Flags::WRAPLINE);
+        }
+
+        grid.scroll_up::<Color>(&(Line(0)..Line(screen_lines as i32)), 1);
+    }
+
+    grid
+}
+
+/// Read all history rows as owned copies for later comparison.
+fn snapshot_history(grid: &Grid<Cell>, columns: usize) -> Vec<Vec<Cell>> {
+    let history = grid.history_size();
+    let mut rows = Vec::with_capacity(history);
+    for i in 0..history {
+        let line = Line(-((history - i) as i32)); // oldest first
+        let mut cells = Vec::with_capacity(columns);
+        for col in 0..columns {
+            cells.push(grid[line][Column(col)].clone());
+        }
+        rows.push(cells);
+    }
+    rows
+}
+
+#[test]
+fn compress_and_thaw_round_trips_all_rows() {
+    let screen = 10;
+    let columns = 80;
+    let history = 200;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    assert_eq!(grid.history_size(), history);
+
+    // Snapshot the history before compression.
+    let before = snapshot_history(&grid, columns);
+
+    // Compress all but 20 hot rows.
+    let keep_hot = 20;
+    grid.compress_old_scrollback(keep_hot);
+
+    assert_eq!(grid.history_size(), keep_hot);
+    assert_eq!(grid.compressed_history_len(), history - keep_hot);
+    assert_eq!(grid.total_history_size(), history);
+
+    // Thaw everything back.
+    grid.thaw_compressed_history(history - keep_hot);
+
+    assert_eq!(grid.history_size(), history);
+    assert_eq!(grid.compressed_history_len(), 0);
+
+    // Verify every row matches the original.
+    let after = snapshot_history(&grid, columns);
+    for (row_idx, (orig, restored)) in before.iter().zip(after.iter()).enumerate() {
+        for (col, (o, r)) in orig.iter().zip(restored.iter()).enumerate() {
+            assert_eq!(o, r, "Mismatch at history row {row_idx}, column {col}");
+        }
+    }
+}
+
+#[test]
+fn compress_reduces_memory() {
+    let screen = 24;
+    let columns = 160;
+    let history = 5000;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    let dense_bytes = grid.history_size() * super::compact::dense_row_bytes(columns);
+
+    grid.compress_old_scrollback(100);
+
+    let compressed_bytes = grid.compressed_history_bytes();
+    let ratio = dense_bytes as f64 / compressed_bytes as f64;
+
+    assert!(
+        ratio > 3.0,
+        "Expected >3× compression, got {ratio:.1}× (dense={dense_bytes}, compressed={compressed_bytes})"
+    );
+}
+
+#[test]
+fn compress_no_op_when_history_below_threshold() {
+    let mut grid = grid_with_scrollback(10, 40, 50);
+
+    grid.compress_old_scrollback(100);
+
+    assert_eq!(grid.history_size(), 50);
+    assert_eq!(grid.compressed_history_len(), 0);
+}
+
+#[test]
+fn compress_all_then_thaw_all() {
+    let screen = 5;
+    let columns = 20;
+    let history = 30;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    let before = snapshot_history(&grid, columns);
+
+    // Compress everything (keep_hot = 0).
+    grid.compress_old_scrollback(0);
+    assert_eq!(grid.history_size(), 0);
+    assert_eq!(grid.compressed_history_len(), history);
+
+    // Thaw everything.
+    grid.thaw_compressed_history(history);
+    assert_eq!(grid.history_size(), history);
+    assert_eq!(grid.compressed_history_len(), 0);
+
+    let after = snapshot_history(&grid, columns);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn incremental_thaw() {
+    let screen = 5;
+    let columns = 20;
+    let history = 100;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    let before = snapshot_history(&grid, columns);
+
+    grid.compress_old_scrollback(10);
+    assert_eq!(grid.compressed_history_len(), 90);
+
+    // Thaw in batches.
+    grid.thaw_compressed_history(30);
+    assert_eq!(grid.history_size(), 40);
+    assert_eq!(grid.compressed_history_len(), 60);
+
+    grid.thaw_compressed_history(60);
+    assert_eq!(grid.history_size(), 100);
+    assert_eq!(grid.compressed_history_len(), 0);
+
+    let after = snapshot_history(&grid, columns);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn thaw_more_than_available_is_clamped() {
+    let mut grid = grid_with_scrollback(5, 20, 50);
+
+    grid.compress_old_scrollback(10);
+    assert_eq!(grid.compressed_history_len(), 40);
+
+    grid.thaw_compressed_history(999);
+    assert_eq!(grid.history_size(), 50);
+    assert_eq!(grid.compressed_history_len(), 0);
+}
+
+#[test]
+fn clear_history_clears_compressed() {
+    let mut grid = grid_with_scrollback(5, 20, 50);
+
+    grid.compress_old_scrollback(10);
+    assert_eq!(grid.compressed_history_len(), 40);
+
+    grid.clear_history();
+    assert_eq!(grid.history_size(), 0);
+    assert_eq!(grid.compressed_history_len(), 0);
+}
+
+#[test]
+fn display_offset_clamped_after_compress() {
+    let screen = 10;
+    let columns = 40;
+    let history = 100;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    // Scroll to the top of history.
+    grid.scroll_display(Scroll::Top);
+    assert_eq!(grid.display_offset, history);
+
+    // Compress most of it — display_offset should be clamped to remaining hot.
+    grid.compress_old_scrollback(20);
+    assert_eq!(grid.display_offset, 20);
+}
+
+#[test]
+fn visible_lines_unchanged_after_compress_thaw() {
+    let screen = 24;
+    let columns = 80;
+    let history = 200;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    // Snapshot visible lines.
+    let mut visible_before = Vec::new();
+    for line in 0..screen {
+        let mut cells = Vec::new();
+        for col in 0..columns {
+            cells.push(grid[Line(line as i32)][Column(col)].clone());
+        }
+        visible_before.push(cells);
+    }
+
+    grid.compress_old_scrollback(50);
+    grid.thaw_compressed_history(grid.compressed_history_len());
+
+    let mut visible_after = Vec::new();
+    for line in 0..screen {
+        let mut cells = Vec::new();
+        for col in 0..columns {
+            cells.push(grid[Line(line as i32)][Column(col)].clone());
+        }
+        visible_after.push(cells);
+    }
+
+    assert_eq!(visible_before, visible_after);
+}
+
+#[test]
+fn compact_scrollback_if_needed_noop_is_cheap() {
+    let screen = 24;
+    let columns = 160;
+    // History is below threshold (2 × 24 = 48), so compact_scrollback_if_needed
+    // should be a no-op every time.
+    let history = 40;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    assert!(grid.history_size() <= screen * 2);
+
+    let iterations = 10_000;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        grid.compact_scrollback_if_needed();
+    }
+    let elapsed = start.elapsed();
+
+    // 10,000 no-op calls should complete in under 5ms (just a comparison).
+    assert!(
+        elapsed.as_millis() < 5,
+        "No-op compact_scrollback_if_needed took {elapsed:?} for {iterations} calls"
+    );
+}
+
+#[test]
+fn compression_throughput() {
+    let columns = 160;
+    let rows_to_compress = 1000;
+
+    // Build diverse rows for compression.
+    let mut rows = Vec::with_capacity(rows_to_compress);
+    let colours = [
+        Color::Named(NamedColor::Red),
+        Color::Named(NamedColor::Green),
+        Color::Named(NamedColor::Blue),
+    ];
+    let default_bg = Color::Named(NamedColor::Background);
+
+    for n in 0..rows_to_compress {
+        let mut row = super::row::Row::<Cell>::new(columns);
+        let text_len = match n % 5 {
+            0 => 0,
+            1 => 20 + (n % 40),
+            2 => 60 + (n % 40),
+            _ => columns,
+        };
+        let fg = colours[n % colours.len()];
+        for col in 0..text_len {
+            row[Column(col)] = colored_cell(
+                (b'!' + ((n + col) % 94) as u8) as char,
+                fg,
+                default_bg,
+            );
+        }
+        if n % 3 == 0 && text_len == columns {
+            row[Column(columns - 1)].flags.insert(Flags::WRAPLINE);
+        }
+        rows.push(row);
+    }
+
+    // Measure compression.
+    let start = std::time::Instant::now();
+    let compressed: Vec<_> = rows.iter().map(super::compact::CompactRow::compress).collect();
+    let compress_elapsed = start.elapsed();
+
+    // Measure decompression.
+    let start = std::time::Instant::now();
+    let decompressed: Vec<_> = compressed.iter().map(super::compact::CompactRow::decompress).collect();
+    let decompress_elapsed = start.elapsed();
+
+    let compress_us_per_row = compress_elapsed.as_micros() as f64 / rows_to_compress as f64;
+    let decompress_us_per_row = decompress_elapsed.as_micros() as f64 / rows_to_compress as f64;
+
+    eprintln!(
+        "Compression:   {rows_to_compress} rows in {compress_elapsed:?} ({compress_us_per_row:.1} µs/row)"
+    );
+    eprintln!(
+        "Decompression: {rows_to_compress} rows in {decompress_elapsed:?} ({decompress_us_per_row:.1} µs/row)"
+    );
+
+    // Verify round-trip.
+    for (orig, restored) in rows.iter().zip(decompressed.iter()) {
+        for col in 0..columns {
+            assert_eq!(orig[Column(col)], restored[Column(col)]);
+        }
+    }
+
+    // Decompression must be fast enough for scrolling: a screenful (24 rows)
+    // should decompress in under 1ms. Only assert in release builds — debug
+    // builds are ~10× slower and would false-positive.
+    let screenful_us = decompress_us_per_row * 24.0;
+    #[cfg(not(debug_assertions))]
+    assert!(
+        screenful_us < 1000.0,
+        "Decompressing 24 rows would take {screenful_us:.0} µs, want < 1000 µs"
+    );
+    let _ = screenful_us;
+}
+
+#[test]
+fn compact_scrollback_if_needed_compresses_when_over_threshold() {
+    let screen = 10;
+    let columns = 40;
+    // Build enough history to exceed 2× screen lines (threshold = 20).
+    let history = 50;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    // Snapshot all history before compression.
+    let before = snapshot_history(&grid, columns);
+    assert_eq!(grid.history_size(), history);
+    assert_eq!(grid.compressed_history_len(), 0);
+
+    grid.compact_scrollback_if_needed();
+
+    // Hot history should be clamped to the threshold (2 × screen = 20).
+    let threshold = screen * 2;
+    assert_eq!(grid.history_size(), threshold);
+    assert_eq!(grid.compressed_history_len(), history - threshold);
+    // Total history is unchanged.
+    assert_eq!(grid.total_history_size(), history);
+
+    // Thaw everything back and verify the rows round-trip.
+    grid.thaw_compressed_history(grid.compressed_history_len());
+    let after = snapshot_history(&grid, columns);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn compact_scrollback_if_needed_noop_when_below_threshold() {
+    let screen = 10;
+    let columns = 40;
+    // History equal to threshold — should not compress.
+    let history = 20;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    grid.compact_scrollback_if_needed();
+
+    assert_eq!(grid.history_size(), history);
+    assert_eq!(grid.compressed_history_len(), 0);
+}
+
+#[test]
+fn scroll_display_with_thaw_into_compressed_territory() {
+    let screen = 10;
+    let columns = 40;
+    let history = 100;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    // Snapshot history before any compression.
+    let full_history = snapshot_history(&grid, columns);
+
+    // Compress most of history, keeping only 20 hot rows.
+    let keep_hot = 20;
+    grid.compress_old_scrollback(keep_hot);
+    assert_eq!(grid.history_size(), keep_hot);
+    assert_eq!(grid.compressed_history_len(), history - keep_hot);
+
+    // Scroll to the very top — this requires thawing all compressed rows.
+    grid.scroll_display_with_thaw(Scroll::Top);
+
+    // display_offset should now cover the full history.
+    assert_eq!(grid.display_offset(), grid.history_size());
+    assert_eq!(grid.total_history_size(), history);
+    // All compressed rows should have been thawed.
+    assert_eq!(grid.compressed_history_len(), 0);
+
+    // Verify the restored history matches the original.
+    let restored = snapshot_history(&grid, columns);
+    assert_eq!(full_history, restored);
+}
+
+#[test]
+fn scroll_display_with_thaw_page_up_incremental() {
+    let screen = 10;
+    let columns = 40;
+    let history = 60;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+
+    // Compress, keeping 10 hot rows.
+    grid.compress_old_scrollback(10);
+    assert_eq!(grid.history_size(), 10);
+    assert_eq!(grid.compressed_history_len(), 50);
+
+    // PageUp once — offset goes from 0 to 10 (one page = screen lines).
+    // This stays within hot history, no thaw needed.
+    grid.scroll_display_with_thaw(Scroll::PageUp);
+    assert_eq!(grid.display_offset(), 10);
+    assert_eq!(grid.compressed_history_len(), 50);
+
+    // PageUp again — offset wants to go to 20 but only 10 hot remain,
+    // so 10 compressed rows must be thawed.
+    grid.scroll_display_with_thaw(Scroll::PageUp);
+    assert_eq!(grid.display_offset(), 20);
+    assert!(grid.compressed_history_len() <= 40);
+}
+
+#[test]
+fn scroll_display_with_thaw_bottom_does_not_thaw() {
+    let screen = 10;
+    let columns = 40;
+    let history = 50;
+
+    let mut grid = grid_with_scrollback(screen, columns, history);
+    grid.compress_old_scrollback(10);
+    let compressed_before = grid.compressed_history_len();
+
+    // Scrolling to bottom should not thaw anything.
+    grid.scroll_display_with_thaw(Scroll::Bottom);
+    assert_eq!(grid.display_offset(), 0);
+    assert_eq!(grid.compressed_history_len(), compressed_before);
+}
+
