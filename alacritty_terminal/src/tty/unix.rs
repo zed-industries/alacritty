@@ -65,6 +65,15 @@ impl SignalMask {
     /// Capture the calling thread's current signal mask.
     pub fn current() -> Result<Self> {
         let mut signal_set = MaybeUninit::<libc::sigset_t>::uninit();
+
+        // `pthread_sigmask` only writes the kernel-relevant portion of `sigset_t` (e.g. 8 bytes
+        // on 64-bit glibc, where `sigset_t` is 128 bytes). Zero the whole struct first so the
+        // remaining padding is deterministic, otherwise reading it (in `PartialEq`) would be
+        // undefined behavior and could spuriously compare unequal.
+        if unsafe { libc::sigemptyset(signal_set.as_mut_ptr()) } != 0 {
+            return Err(Error::last_os_error());
+        }
+
         let result = unsafe {
             libc::pthread_sigmask(libc::SIG_SETMASK, ptr::null(), signal_set.as_mut_ptr())
         };
