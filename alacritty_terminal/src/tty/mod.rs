@@ -35,6 +35,10 @@ pub struct Options {
     /// Extra environment variables.
     pub env: HashMap<String, String>,
 
+    /// Signal mask to apply in the child process before exec.
+    #[cfg(not(windows))]
+    pub child_signal_mask: Option<SignalMask>,
+
     /// Specifies whether the Windows shell arguments should be escaped.
     ///
     /// - When `true`: Arguments will be escaped according to the standard C runtime rules.
