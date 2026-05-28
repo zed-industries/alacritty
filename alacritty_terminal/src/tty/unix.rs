@@ -1,6 +1,7 @@
 //! TTY related functionality.
 
 use std::ffi::{CStr, CString};
+use std::fmt;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result};
 use std::mem::MaybeUninit;
@@ -53,6 +54,47 @@ fn set_controlling_terminal(fd: c_int) -> Result<()> {
     };
 
     if res == 0 { Ok(()) } else { Err(Error::last_os_error()) }
+}
+
+/// Signal mask to apply to a spawned PTY child before exec.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SignalMask(libc::sigset_t);
+
+impl SignalMask {
+    /// Capture the calling thread's current signal mask.
+    pub fn current() -> Result<Self> {
+        let mut signal_set = MaybeUninit::<libc::sigset_t>::uninit();
+
+        // `pthread_sigmask` only writes the kernel-relevant portion of `sigset_t` (e.g. 8 bytes
+        // on 64-bit glibc, where `sigset_t` is 128 bytes). Zero the whole struct first so the
+        // remaining padding is deterministic, otherwise reading it (in `PartialEq`) would be
+        // undefined behavior and could spuriously compare unequal.
+        if unsafe { libc::sigemptyset(signal_set.as_mut_ptr()) } != 0 {
+            return Err(Error::last_os_error());
+        }
+
+        let result = unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, ptr::null(), signal_set.as_mut_ptr())
+        };
+
+        if result != 0 {
+            Err(Error::from_raw_os_error(result))
+        } else {
+            Ok(Self(unsafe { signal_set.assume_init() }))
+        }
+    }
+
+    fn apply(self) -> Result<()> {
+        let result = unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.0, ptr::null_mut()) };
+
+        if result == -1 { Err(Error::last_os_error()) } else { Ok(()) }
+    }
+}
+
+impl fmt::Debug for SignalMask {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("SignalMask").finish()
+    }
 }
 
 #[derive(Debug)]
@@ -244,7 +286,7 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
         .working_directory
         .as_ref()
         .and_then(|path| CString::new(path.as_os_str().as_bytes()).ok());
-
+    let child_signal_mask = config.child_signal_mask;
     unsafe {
         builder.pre_exec(move || {
             // Create a new process group.
@@ -263,6 +305,10 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
             // No longer need slave/master fds.
             libc::close(slave_fd);
             libc::close(master_fd);
+
+            if let Some(child_signal_mask) = child_signal_mask {
+                child_signal_mask.apply()?;
+            }
 
             libc::signal(libc::SIGCHLD, libc::SIG_DFL);
             libc::signal(libc::SIGHUP, libc::SIG_DFL);
@@ -415,6 +461,218 @@ impl OnResize for Pty {
 
         if res < 0 {
             die!("ioctl TIOCSWINSZ failed: {}", Error::last_os_error());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::mem::MaybeUninit;
+    use std::os::unix::process::ExitStatusExt;
+    use std::ptr;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use crate::event::WindowSize;
+    use crate::tty::{Options, Shell};
+
+    struct SignalMaskGuard {
+        previous: libc::sigset_t,
+    }
+
+    impl SignalMaskGuard {
+        fn block_signal(signal: libc::c_int) -> Self {
+            let mut blocked = MaybeUninit::<libc::sigset_t>::uninit();
+            let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
+
+            unsafe {
+                assert_eq!(libc::sigemptyset(blocked.as_mut_ptr()), 0);
+                let mut blocked = blocked.assume_init();
+                assert_eq!(libc::sigaddset(&mut blocked, signal), 0);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, previous.as_mut_ptr()),
+                    0
+                );
+
+                Self { previous: previous.assume_init() }
+            }
+        }
+    }
+
+    impl Drop for SignalMaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous, ptr::null_mut()),
+                    0
+                );
+            }
+        }
+    }
+
+    fn sleep_command_options(child_signal_mask: Option<super::SignalMask>) -> Options {
+        Options {
+            shell: Some(Shell::new("/bin/sleep".to_owned(), vec!["30".to_owned()])),
+            child_signal_mask,
+            ..Options::default()
+        }
+    }
+
+    fn window_size() -> WindowSize {
+        WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 }
+    }
+
+    fn wait_for_child_exit(
+        pty: &mut super::Pty,
+        timeout: Duration,
+    ) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = pty.child.try_wait().expect("failed to poll PTY child") {
+                return Some(status);
+            }
+
+            if Instant::now() >= deadline {
+                return None;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_ctrl_c_terminates_sleep_child(child_signal_mask: Option<super::SignalMask>) {
+        let mut pty = super::new(&sleep_command_options(child_signal_mask), window_size(), 0)
+            .expect("failed to spawn PTY child");
+
+        pty.file.write_all(b"\x03").expect("failed to write Ctrl-C to PTY");
+
+        let status = wait_for_child_exit(&mut pty, Duration::from_secs(2))
+            .expect("PTY child did not exit after Ctrl-C");
+
+        assert_eq!(status.signal(), Some(libc::SIGINT));
+    }
+
+    #[test]
+    fn ctrl_c_reaches_child_spawned_with_default_signal_mask() {
+        assert_ctrl_c_terminates_sleep_child(None);
+    }
+
+    #[test]
+    fn ctrl_c_reaches_child_spawned_with_sigint_blocked_on_parent_thread() {
+        let child_signal_mask =
+            super::SignalMask::current().expect("failed to capture signal mask");
+        let _signal_mask_guard = SignalMaskGuard::block_signal(libc::SIGINT);
+
+        assert_ctrl_c_terminates_sleep_child(Some(child_signal_mask));
+    }
+
+    /// Spawns a `/bin/sleep` PTY child the way Zed does: the signal mask is captured on a
+    /// "foreground" thread (where terminal signals are unblocked) while the PTY itself is
+    /// created on a separate "background" thread that has `signal` blocked.
+    ///
+    /// On macOS, Zed's background executor runs work on libdispatch (GCD) worker threads,
+    /// which start with terminal signals blocked. Without forwarding the foreground mask
+    /// through `Options::child_signal_mask`, the forked child inherits that blocked mask
+    /// and never receives the signal.
+    fn spawn_sleep_child_with_foreground_signal_mask(signal: libc::c_int) -> super::Pty {
+        let (mask_tx, mask_rx) = mpsc::channel();
+
+        // "Foreground" thread: capture the mask while `signal` is unblocked, then hand it off.
+        let foreground = thread::spawn(move || {
+            let mask = super::SignalMask::current().expect("failed to capture signal mask");
+            mask_tx.send(mask).expect("failed to forward captured signal mask");
+        });
+
+        // "Background" thread: block `signal`, then spawn the child with the captured mask.
+        let background = thread::spawn(move || {
+            let _signal_mask_guard = SignalMaskGuard::block_signal(signal);
+            let mask = mask_rx.recv().expect("failed to receive captured signal mask");
+            super::new(&sleep_command_options(Some(mask)), window_size(), 0)
+                .expect("failed to spawn PTY child")
+        });
+
+        foreground.join().expect("foreground thread panicked");
+        background.join().expect("background thread panicked")
+    }
+
+    /// Asserts that a signal Alacritty does *not* reset to `SIG_DFL` in its `pre_exec` hook is
+    /// still deliverable to a child spawned on a background thread that had it blocked, because
+    /// the captured foreground mask is applied before exec.
+    ///
+    /// Alacritty only resets the dispositions of `SIGCHLD`, `SIGHUP`, `SIGINT`, `SIGQUIT`,
+    /// `SIGTERM` and `SIGALRM`. Every other signal relies entirely on the inherited signal mask
+    /// being correct, so this is where forwarding the foreground mask actually matters.
+    fn assert_signal_reaches_child_spawned_on_background_thread(signal: libc::c_int) {
+        let mut pty = spawn_sleep_child_with_foreground_signal_mask(signal);
+        let pid = pty.child.id() as libc::pid_t;
+
+        assert_eq!(
+            unsafe { libc::kill(pid, signal) },
+            0,
+            "failed to send signal {signal} to PTY child: {}",
+            std::io::Error::last_os_error(),
+        );
+
+        let status = wait_for_child_exit(&mut pty, Duration::from_secs(2))
+            .unwrap_or_else(|| panic!("PTY child did not exit after signal {signal}"));
+
+        assert_eq!(status.signal(), Some(signal));
+    }
+
+    // The signals below are representative of those Alacritty does not reset: their default
+    // action is to terminate, and they are not used by the Rust test runtime, so delivery can
+    // be observed via process termination. Stop-default (`SIGTSTP`/`SIGTTIN`/`SIGTTOU`) and
+    // ignore-default (`SIGWINCH`) signals can't be observed this way and are not covered here.
+    #[test]
+    fn sigusr1_reaches_child_spawned_on_background_thread() {
+        assert_signal_reaches_child_spawned_on_background_thread(libc::SIGUSR1);
+    }
+
+    #[test]
+    fn sigusr2_reaches_child_spawned_on_background_thread() {
+        assert_signal_reaches_child_spawned_on_background_thread(libc::SIGUSR2);
+    }
+
+    #[test]
+    fn sigvtalrm_reaches_child_spawned_on_background_thread() {
+        assert_signal_reaches_child_spawned_on_background_thread(libc::SIGVTALRM);
+    }
+
+    /// Without forwarding the foreground mask, a child spawned on a thread that has a signal
+    /// blocked inherits that blocked mask and never receives the signal. This pins down the
+    /// regression that broke Ctrl-C in the terminal when spawning moved to the background
+    /// executor (zed-industries/zed#42234, #42411).
+    #[test]
+    fn signal_blocked_on_spawn_thread_is_not_delivered_without_foreground_mask() {
+        let signal = libc::SIGUSR1;
+
+        let mut pty = thread::spawn(move || {
+            let _signal_mask_guard = SignalMaskGuard::block_signal(signal);
+            super::new(&sleep_command_options(None), window_size(), 0)
+                .expect("failed to spawn PTY child")
+        })
+        .join()
+        .expect("spawn thread panicked");
+
+        let pid = pty.child.id() as libc::pid_t;
+        assert_eq!(
+            unsafe { libc::kill(pid, signal) },
+            0,
+            "failed to send signal {signal} to PTY child: {}",
+            std::io::Error::last_os_error(),
+        );
+
+        // The signal is blocked in the child, so it must still be running after a grace period.
+        assert!(
+            wait_for_child_exit(&mut pty, Duration::from_millis(500)).is_none(),
+            "child exited after a blocked signal was sent; it should have stayed blocked",
+        );
+
+        // Clean up the still-running child.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 }

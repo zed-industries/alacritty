@@ -137,6 +137,8 @@ impl UiConfig {
             shell,
             drain_on_exit: false,
             env: HashMap::new(),
+            #[cfg(not(windows))]
+            child_signal_mask: None,
             #[cfg(target_os = "windows")]
             escape_args: false,
         }
