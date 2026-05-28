@@ -4,7 +4,7 @@ use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result};
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
@@ -13,7 +13,6 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "macos")]
 use std::path::Path;
 use std::process::{Child, Command};
-use std::slice;
 use std::sync::Arc;
 use std::{env, ptr};
 
@@ -58,7 +57,7 @@ fn set_controlling_terminal(fd: c_int) -> Result<()> {
 }
 
 /// Signal mask to apply to a spawned PTY child before exec.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SignalMask(libc::sigset_t);
 
 impl SignalMask {
@@ -97,24 +96,6 @@ impl fmt::Debug for SignalMask {
         formatter.debug_tuple("SignalMask").finish()
     }
 }
-
-impl PartialEq for SignalMask {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe {
-            let this = slice::from_raw_parts(
-                ptr::from_ref(&self.0).cast::<u8>(),
-                mem::size_of::<libc::sigset_t>(),
-            );
-            let other = slice::from_raw_parts(
-                ptr::from_ref(&other.0).cast::<u8>(),
-                mem::size_of::<libc::sigset_t>(),
-            );
-            this == other
-        }
-    }
-}
-
-impl Eq for SignalMask {}
 
 #[derive(Debug)]
 struct Passwd<'a> {

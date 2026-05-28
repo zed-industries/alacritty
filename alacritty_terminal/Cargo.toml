@@ -18,7 +18,7 @@ serde = ["dep:serde", "bitflags/serde", "vte/serde"]
 base64 = "0.22.0"
 bitflags = "2.4.1"
 home = "0.5.5"
-libc = "0.2"
+libc = { version = "0.2", features = ["extra_traits"] }
 log = "0.4"
 parking_lot = "0.12.0"
 polling = "3.8.0"
