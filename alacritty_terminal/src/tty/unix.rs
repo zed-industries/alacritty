@@ -1,7 +1,6 @@
 //! TTY related functionality.
 
 use std::ffi::{CStr, CString};
-use std::fmt;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result};
 use std::mem::MaybeUninit;
@@ -14,7 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::Arc;
-use std::{env, ptr};
+use std::{env, fmt, ptr};
 
 use libc::{F_GETFL, F_SETFL, O_NONBLOCK, TIOCSCTTY, c_int, fcntl};
 use log::error;
@@ -336,7 +335,7 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
             unsafe {
                 // Maybe this should be done outside of this function so nonblocking
                 // isn't forced upon consumers. Although maybe it should be?
-                set_nonblocking(master_fd);
+                set_nonblocking(master_fd)?;
             }
 
             Ok(Pty { child, file: File::from(master), signals, sig_id })
@@ -470,10 +469,9 @@ mod tests {
     use std::io::Write;
     use std::mem::MaybeUninit;
     use std::os::unix::process::ExitStatusExt;
-    use std::ptr;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::{Duration, Instant};
+    use std::{ptr, thread};
 
     use crate::event::WindowSize;
     use crate::tty::{Options, Shell};
@@ -694,9 +692,9 @@ impl ToWinsize for WindowSize {
     }
 }
 
-unsafe fn set_nonblocking(fd: c_int) {
+unsafe fn set_nonblocking(fd: c_int) -> Result<()> {
     let res = unsafe { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) };
-    assert_eq!(res, 0);
+    if res == 0 { Ok(()) } else { Err(Error::last_os_error()) }
 }
 
 #[test]
